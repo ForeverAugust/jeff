@@ -39,12 +39,18 @@ def test_live_last_requests_on_one_screen_share_everything_before_the_changing_o
     assert shared.endswith("A: 1: Home\nB: 2: ")
 
 
-def test_live_last_needs_an_object_state() -> None:
-    plain = {"state": "just text", "question": {"type": "choice", "criteria": {"1": "Home"}}}
+def test_live_last_keeps_a_plain_text_state_in_the_original_order() -> None:
+    # Putting a long text after the options cost 3.5 points on the documents check, and the
+    # only reusable part of such a prompt (question and options) is short, so a plain-text state keeps v1.2's order.
+    plain = {"state": "Is this review positive?\nGreat food, slow service.",
+             "question": {"type": "choice", "instructions": "Pick one.", "criteria": {"1": "Yes", "2": "No"}}}
+    assert decision_messages(plain, CODES, "live-last") == decision_messages(plain, CODES, "state-first")
+
+
+def test_live_last_needs_at_least_one_field_in_an_object_state() -> None:
+    empty = {"state": {}, "question": {"type": "choice", "criteria": {"1": "Home"}}}
     with pytest.raises(ValueError, match="live-last"):
-        decision_messages(plain, CODES, "live-last")
-    with pytest.raises(ValueError, match="live-last"):
-        decision_messages({**plain, "state": {}}, CODES, "live-last")
+        decision_messages(empty, CODES, "live-last")
 
 
 def test_unknown_layout_is_an_error() -> None:

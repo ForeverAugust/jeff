@@ -69,6 +69,9 @@ class Arguments(argparse.Namespace):
     lora_alpha: int | None
     lora_dropout: float | None
     readout_lr: float | None
+    keep_stage_order: bool
+    lr_shape: str
+    decay_start: float | None
 
 
 def digest(path: str | Path) -> str:
@@ -425,6 +428,65 @@ def archive_interrupted_tail(run: Path, output: Path, step: int) -> None:
     record("training_resumed", run=run.name, resume_step=step, archived_tail=archive.exists(), attempt=suffix)
 
 
+LR_SHAPES = ("cosine", "wsd")
+
+
+def stage_of(row: Example) -> str:
+    """The data stage of a row: the second ':'-separated field of its id (source:stage:...)."""
+    fields = str(row["id"]).split(":")
+    if len(fields) < 3 or not fields[1]:
+        raise ValueError(f"Row id {row['id']!r} has no stage field (expected source:stage:...)")
+    return fields[1]
+
+
+def training_groups(train: Sequence[Example], *, seed: int, epochs: int, effective_batch_size: int,
+                    keep_stage_order: bool) -> list[list[Example]]:
+    """Optimizer-step groups for every epoch. By default all rows are shuffled together. With keep_stage_order the
+    file's stage order is kept (each stage must be one contiguous block) and rows are shuffled only within a stage."""
+    blocks: list[list[Example]] = [list(train)]
+    if keep_stage_order:
+        blocks, order = [], []
+        for row in train:
+            stage = stage_of(row)
+            if not order or order[-1] != stage:
+                if stage in order:
+                    raise ValueError(f"Stage {stage!r} appears again after stage {order[-1]!r}: write each stage as one block, in training order")
+                order.append(stage)
+                blocks.append([])
+            blocks[-1].append(row)
+    groups: list[list[Example]] = []
+    for epoch in range(epochs):
+        ordered: list[Example] = []
+        for block in blocks:
+            shuffled = list(block)
+            random.Random(seed + epoch).shuffle(shuffled)
+            ordered += shuffled
+        for offset in range(0, len(ordered), effective_batch_size):
+            groups.append(sorted(ordered[offset:offset + effective_batch_size], key=length_estimate))
+    return groups
+
+
+def learning_rate_factor(step: int, total_steps: int, shape: str, decay_start: float | None) -> float:
+    """Multiplier on the peak learning rate. Both shapes warm up linearly over the first 5% of steps and end at 0.1.
+    cosine: cosine decay after warm-up. wsd: hold the peak until decay_start (a fraction of all steps), then decay
+    linearly."""
+    if shape not in LR_SHAPES:
+        raise ValueError(f"Unknown learning-rate shape {shape!r}; use one of {LR_SHAPES}")
+    warmup = max(1, int(0.05 * total_steps))
+    if shape == "cosine":
+        if decay_start is not None:
+            raise ValueError("--decay-start applies only to --lr-shape wsd")
+        return step / warmup if step <= warmup else 0.1 + 0.45 * (1 + math.cos(math.pi * (step - warmup) / max(1, total_steps - warmup)))
+    if decay_start is None or not 0.05 < decay_start < 1:
+        raise ValueError("--lr-shape wsd needs --decay-start between 0.05 and 1 (a fraction of all steps)")
+    if step <= warmup:
+        return step / warmup
+    decay_from = decay_start * total_steps
+    if step <= decay_from:
+        return 1.0
+    return 1.0 - 0.9 * (step - decay_from) / max(1, total_steps - decay_from)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for name, default in [("train", "data/train.jsonl"), ("development", "data/dev.jsonl"),
@@ -466,11 +528,17 @@ def main() -> None:
     parser.add_argument("--lora-alpha", type=int, help="LoRA alpha; default: twice the rank")
     parser.add_argument("--lora-dropout", type=float, help="LoRA dropout; default: 0")
     parser.add_argument("--readout-lr", type=float, help="Peak learning rate of the answer readout; default: --lr")
+    parser.add_argument("--keep-stage-order", action="store_true", help="Keep the training file's stage order (stage = second ':' field of each row id; each stage one contiguous block) and shuffle only within each stage")
+    parser.add_argument("--lr-shape", choices=LR_SHAPES, default="cosine", help="cosine (default) or wsd: warm up, hold the peak, then decay linearly from --decay-start")
+    parser.add_argument("--decay-start", type=float, help="With --lr-shape wsd: the fraction of all steps at which the decay begins")
     args = parser.parse_args(namespace=Arguments())
     if args.lora_rank is None and (args.lora_alpha is not None or args.lora_dropout is not None):
         raise ValueError("--lora-alpha and --lora-dropout apply only with --lora-rank")
     if args.lora_rank is not None and not args.initial_checkpoint:
         raise ValueError("--lora-rank trains an adapter for a Jeff checkpoint: give it as --initial-checkpoint")
+    learning_rate_factor(1, 100, args.lr_shape, args.decay_start)
+    if args.keep_stage_order and args.schedule:
+        raise ValueError("--keep-stage-order applies to --train, not to a streamed --schedule")
     if args.readout_lr is not None and not (math.isfinite(args.readout_lr) and args.readout_lr > 0):
         raise ValueError("--readout-lr must be positive")
     if min(args.epochs, args.batch_size, args.effective_batch_size, args.token_budget, args.eval_every, args.public_eval_every, args.resume_every, args.quick_eval_every) < 1:
@@ -585,12 +653,8 @@ def main() -> None:
     readout_rates = {name: args.readout_lr for name, _ in model.named_parameters() if name.startswith("readout.")} if args.readout_lr is not None else None
     optimizer = CPUOffloadAdamW(model.named_parameters(), lr=args.lr, weight_decay=args.weight_decay, learning_rates=readout_rates)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    groups: list[list[Example]] = []
-    for epoch in range(args.epochs):
-        ordered = list(train)
-        random.Random(args.seed + epoch).shuffle(ordered)
-        for offset in range(0, len(ordered), args.effective_batch_size):
-            groups.append(sorted(ordered[offset:offset + args.effective_batch_size], key=length_estimate))
+    groups = training_groups(train, seed=args.seed, epochs=args.epochs, effective_batch_size=args.effective_batch_size,
+                             keep_stage_order=args.keep_stage_order)
     total_steps = math.ceil(train_rows / args.effective_batch_size) if scheduled else len(groups)
     step, examples_seen = 0, 0
     last_resume_step: int | None = None
@@ -762,8 +826,7 @@ def main() -> None:
         if not math.isfinite(gradient_norm):
             raise RuntimeError(f"Nonfinite gradient at step {step + 1}")
         step += 1
-        warmup = max(1, int(0.05 * total_steps))
-        factor = step / warmup if step <= warmup else 0.1 + 0.45 * (1 + math.cos(math.pi * (step - warmup) / max(1, total_steps - warmup)))
+        factor = learning_rate_factor(step, total_steps, args.lr_shape, args.decay_start)
         for group_parameters in optimizer.param_groups:
             group_parameters["lr"] = group_parameters["peak_lr"] * factor
         optimizer_started = time.monotonic()

@@ -63,8 +63,9 @@ def options(question: Question) -> tuple[list[str], list[Content]]:
 # How the prompt is ordered; a checkpoint records its layout in decision_config.json ("prompt_layout").
 # state-first: the original order (state, question, options). Checkpoints without the setting use it.
 # live-last: question, the state without its last field, options, then the last state field (for example a voice
-# transcript). Everything before the options that change per request stays the same across requests on one screen,
-# so a server can process it once and reuse it.
+# transcript). A plain-text state keeps the state-first order (see decision_messages). Everything before the
+# options that change per request stays the same across requests on one screen, so a server can process it once and
+# reuse it. The v1.3 request format (docs/v1.3-request-format.md) freezes this layout.
 PROMPT_LAYOUTS = ("state-first", "live-last")
 
 
@@ -78,15 +79,17 @@ def decision_messages(row: DecisionInput, codes: Sequence[str], layout: str = "s
         raise ValueError("Questions must have 1 to 255 options, each with an answer code.")
     instructions = "Question:\n" + describe(question.get("instructions") or "Choose the best matching option.")
     listed = "Options:\n" + "\n".join(f"{code}: {describe(description)}" for code, description in zip(codes, descriptions))
-    if layout == "state-first":
-        prompt = "State:\n" + describe(row["state"]) + "\n\n" + instructions + "\n\n" + listed
-    else:
-        state = row["state"]
-        if not isinstance(state, dict) or not state:
-            raise ValueError("The live-last layout needs the state as an object with at least one field")
+    state = row["state"]
+    if layout == "live-last" and isinstance(state, dict):
+        if not state:
+            raise ValueError("The live-last layout needs an object state to have at least one field")
         *earlier, last = state
         prompt = (instructions + "\n\nState:\n" + describe({key: state[key] for key in earlier}) + "\n\n" + listed
                   + "\n\nLatest:\n" + describe({last: state[last]}))
+    else:
+        # state-first, and live-last with a plain-text state: putting a long text after the options cost 3.5 points
+        # on the documents check, and the reusable part of such a prompt (question and options) is short.
+        prompt = "State:\n" + describe(state) + "\n\n" + instructions + "\n\n" + listed
     prompt += "\n\nReturn only the letter code of the best option."
     content = [{"type": "image"} for _ in row.get("images", [])] + [{"type": "text", "text": prompt}]
     return [
