@@ -190,6 +190,12 @@ options), `noul` (yes/no) and `score` (a point on a scale). The HTTP API, the Ty
 [docs on jeffhub.ai](https://jeffhub.ai/docs). Two rules matter: never use bare numbers as option keys, and put the
 unchanging parts of a request first and the changing field last.
 
+jeff-serve answers one request at a time. By default, a request that arrives while another is running gets HTTP 529
+with `Retry-After: 1`. Set `JEFF_QUEUE_MS=500` (for example) and it waits up to that many milliseconds for the model
+before answering 529. Clients that send requests in parallel should set it, or retry on 529. Text-only serving still
+needs torchvision, because the model's processor also handles images; `uv sync` installs it, but an existing
+environment may lack it.
+
 ## GGUF for llama.cpp
 
 `mstrasser/jeff-base-gguf` has the base in Q8_0 and Q4_K_M; each adapter has a small LoRA GGUF (about 169 MB) in
@@ -264,6 +270,10 @@ test prompts; v1.2 and v1.3 measured back to back on the same idle GPU, 5 Octobe
 GPU memory for the base, one adapter, nine adapters and merged was measured with v1.2; v1.3 has the same size. The 3- and
 15-adapter rows are v1.3, measured on the same GPU. Most of each decision is fixed overhead: a 251-token
 prompt takes about 25 ms and a 2,569-token prompt about 33 ms.
+
+**On a laptop GPU** (reported in [#8](https://github.com/firelex/jeff/issues/8)): v1.2 with `guard` and `ground` loaded
+used about 2.1 GB on an 8 GB RTX 3070 Ti Laptop GPU under WSL2, without flash-linear-attention. Medians measured from
+the client were 144–274 ms per decision, depending on the adapter and the text length (up to about 4,000 characters).
 
 ## Using it well
 

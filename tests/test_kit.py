@@ -59,6 +59,15 @@ def test_check_rows_names_the_row_and_problem(change: dict[str, Any], message: s
     assert message in str(error.value)
 
 
+def test_check_rows_accepts_template_slots_in_rows_marked_as_real_content() -> None:
+    text = "<h1>{{TITLE}}</h1> by {{AUTHOR}}: {{BODY_HTML}}"
+    check_rows([row("r1", "f", text, "other", real_template_slots=True)], Path("x.jsonl"))
+    with pytest.raises(RowError, match="unfilled template slots"):
+        check_rows([row("r1", "f", text, "other")], Path("x.jsonl"))
+    with pytest.raises(RowError, match="'source.real_template_slots' must be true or false"):
+        check_rows([row("r1", "f", text, "other", real_template_slots="yes")], Path("x.jsonl"))
+
+
 def test_check_rows_finds_missing_fields_and_duplicate_ids(tmp_path: Path) -> None:
     first = row("same", "f", "hi", "other")
     second = row("same", "f", "hello", "other")

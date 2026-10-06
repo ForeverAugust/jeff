@@ -67,8 +67,13 @@ def row_problems(row: dict[str, object]) -> list[str]:
     for name in ("id", "suite", "family"):
         if name in row and (not isinstance(row[name], str) or not str(row[name]).strip()):
             found.append(f"{name!r} must be a non-empty string")
-    if "source" in row and not isinstance(row["source"], dict):
+    source = row.get("source")
+    if "source" in row and not isinstance(source, dict):
         found.append("'source' must be an object")
+    # Rows made from real text (a template file an agent read, say) may hold {{...}} on purpose: the row says so
+    real_slots = source.get("real_template_slots", False) if isinstance(source, dict) else False
+    if not isinstance(real_slots, bool):
+        found.append("'source.real_template_slots' must be true or false")
     state = row.get("state")
     if "state" in row and (not isinstance(state, (str, dict, list)) or not state):
         found.append("'state' must be a non-empty string, object or list")
@@ -114,7 +119,7 @@ def row_problems(row: dict[str, object]) -> list[str]:
     if isinstance(criteria, dict):
         texts += list(criteria)
     slots = sorted({slot for text in texts for slot in TEMPLATE_SLOT.findall(text)})
-    if slots:
+    if slots and real_slots is not True:
         found.append(f"unfilled template slots: {', '.join(slots[:5])}")
     return found
 

@@ -36,6 +36,9 @@ Each line of a rows file is one JSON object:
   label is not one of the option keys; an option key is a bare number (`"1"`, which JavaScript silently reorders);
   two rows share an id; a family is empty; or a text still holds a template slot such as `{{Order Number}}`. The
   error names each row (its line and id) and the problem. Fix the rows; nothing is fixed for you.
+- **Real template text:** when `{{...}}` is part of the real content (an evaluation row built from a template file
+  an agent read, say), mark that row with `"real_template_slots": true` in its `source`. Leave it out for
+  generated rows, where a slot means the generator forgot to fill it.
 - **Family** groups rows that belong together: the same company, app or document. The test set holds out whole
   families, so pick it to match what "new" means for your job (a new company, a new app).
 

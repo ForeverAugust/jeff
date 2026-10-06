@@ -4,7 +4,10 @@ With JEFF_ADAPTERS set to a folder of LoRA adapters (jeff.lora), the base checkp
 "model" field chooses the base or one adapter (the adapter's folder name): JEFF_ADAPTER_MODE=shared, the default.
 JEFF_ADAPTER_MODE=merged serves exactly one adapter folded into the base weights, at the base's speed; the plain base
 is then not served and adapters cannot be reloaded. JEFF_LORA_PRECISION: model (the default: LoRA weights in the base's
-dtype) or float32 (the reference)."""
+dtype) or float32 (the reference).
+
+The model answers one request at a time. JEFF_QUEUE_MS (default 0) is how long a request that arrives while the model is
+busy waits for it; when the wait runs out the request gets 529 with Retry-After: 1."""
 
 from __future__ import annotations
 
@@ -17,7 +20,7 @@ import threading
 import time
 import uuid
 from _thread import LockType
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -56,6 +59,7 @@ class Service:
     release_date: str = ""
     max_options: int = 0  # the most options the model was trained on; set from decision_config.json
     lock: LockType = field(default_factory=threading.Lock)
+    queue_seconds: float = 0  # JEFF_QUEUE_MS: how long a request waits for the model before it gets 529
     # LoRA adapters (JEFF_ADAPTERS): name -> the most options that adapter was trained on; empty without adapters
     adapters: dict[str, int] = field(default_factory=dict)
     adapter_stamps: dict[str, tuple[tuple[str, int, int], ...]] = field(default_factory=dict)
@@ -65,6 +69,31 @@ class Service:
 
 
 service = Service()
+
+
+class Busy(Exception):
+    """The model stayed busy for the whole queue time."""
+
+
+def queue_seconds(value: str | None) -> float:
+    """JEFF_QUEUE_MS, a whole number of milliseconds (0 when unset), in seconds."""
+    if value is None:
+        return 0
+    if not value.isdigit():
+        raise ValueError(f"JEFF_QUEUE_MS={value!r}; use a whole number of milliseconds, 0 or more")
+    return int(value) / 1000
+
+
+def locked[T](timeout: float, work: Callable[[], T]) -> T:
+    """Run `work` holding the model lock, waiting up to `timeout` seconds for it (-1: as long as it takes); raise Busy
+    when the wait runs out. Run in the thread pool: waiting, working and releasing happen in one thread, so a request
+    cancelled while it waits can never leave the lock held."""
+    if not service.lock.acquire(timeout=timeout):
+        raise Busy
+    try:
+        return work()
+    finally:
+        service.lock.release()
 
 
 class Question(BaseModel):
@@ -222,6 +251,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from jeff.model import DecisionModel
 
     service.checkpoint = os.getenv("JEFF_CHECKPOINT", "checkpoints/selected")
+    service.queue_seconds = queue_seconds(os.getenv("JEFF_QUEUE_MS"))
     from jeff.models import device_from_environment, load_decision_model
 
     backend = os.getenv("JEFF_BACKEND", "pytorch")
@@ -359,32 +389,27 @@ async def system_one(body: EvaluationRequest) -> DecisionResponse:
     if model is None:
         raise HTTPException(503, "The model is not ready.")
     check_option_counts(body)
-    if not service.lock.acquire(blocking=False):
-        raise HTTPException(529, "The model is busy. Retry shortly.", headers={"Retry-After": "1"})
     try:
-        return await run_in_threadpool(predict, model, body)
+        return await run_in_threadpool(locked, service.queue_seconds, lambda: predict(model, body))
+    except Busy as error:
+        raise HTTPException(529, "The model is busy. Retry shortly.", headers={"Retry-After": "1"}) from error
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
-    finally:
-        service.lock.release()
 
 
 @app.post("/v1/adapters/reload", dependencies=[Depends(authenticate)], response_model=None)
 async def reload_adapters() -> dict[str, JSONValue]:
     """Load adapters added to the JEFF_ADAPTERS folder, drop removed ones and reload changed ones, without restarting.
-    Requests wait (get 529) while it runs."""
+    Requests wait (or get 529 once JEFF_QUEUE_MS runs out) while it runs."""
     if service.merged is not None:
         raise HTTPException(409, f"This server has {service.merged} merged into the base (JEFF_ADAPTER_MODE=merged); "
                                  "restart it to change adapters.")
     if service.adapter_set is None:
         raise HTTPException(409, "Adapters are off: start the server with JEFF_ADAPTERS set to a folder of adapters.")
-    await run_in_threadpool(service.lock.acquire)
     try:
-        return await run_in_threadpool(sync_adapters)
+        return await run_in_threadpool(locked, -1, sync_adapters)
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
-    finally:
-        service.lock.release()
 
 
 def main() -> None:
