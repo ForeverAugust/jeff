@@ -297,3 +297,12 @@ def test_the_client_matches_the_real_server(monkeypatch: pytest.MonkeyPatch) -> 
     finally:
         running.should_exit = True
         thread.join(timeout=5)
+
+
+def test_the_client_types_and_helpers_import_from_the_package() -> None:
+    import jeff
+    from jeff import client
+    from jeff import Answers, Busy, Choice, Client, JeffError, Question, Score, choice_question  # noqa: F401
+
+    for name in jeff.__all__:
+        assert getattr(jeff, name) is getattr(client, name)
