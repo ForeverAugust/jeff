@@ -11,7 +11,7 @@ class Uniform:
     backend = "mlx"
     base_model = "Qwen/Qwen3.5-0.8B"
 
-    def decide(self, rows):
+    def decide(self, rows, max_length):
         return [([1 / len(row["question"]["criteria"])] * len(row["question"]["criteria"]), 10) for row in rows]
 
 

@@ -150,7 +150,7 @@ class MlxFake:
     backend = "mlx"
     base_model = "Qwen/Qwen3.5-0.8B"
 
-    def decide(self, rows):
+    def decide(self, rows, max_length):
         return [(softmax(logits(row, {"Response 2": 0.5}, [2.0, 1.0, 0.5, 0.0])), 10) for row in rows]
 
 
@@ -159,7 +159,7 @@ class TorchFake:
     base_model = "Qwen/Qwen3.5-0.8B"
     temperature = 2.0
 
-    def prepare(self, rows):
+    def prepare(self, rows, max_length):
         self.rows = list(rows)
         return PreparedBatch({}, tuple(len(options(row["question"])[0]) for row in rows), 7 * len(rows))
 

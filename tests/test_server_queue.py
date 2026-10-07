@@ -12,7 +12,7 @@ class Uniform:
     backend = "mlx"
     base_model = "Qwen/Qwen3.5-0.8B"
 
-    def decide(self, rows):
+    def decide(self, rows, max_length):
         return [([1 / len(row["question"]["criteria"])] * len(row["question"]["criteria"]), 10) for row in rows]
 
 
@@ -61,7 +61,7 @@ def test_a_request_gets_529_when_the_queue_time_runs_out(client: TestClient, mon
 
 
 class Failing(Uniform):
-    def decide(self, rows):
+    def decide(self, rows, max_length):
         raise ValueError("the state is too long")
 
 

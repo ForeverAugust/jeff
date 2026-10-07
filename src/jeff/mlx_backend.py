@@ -128,13 +128,16 @@ class MlxDecisionModel:
                                                   add_generation_prompt=True, enable_thinking=False)
         return list(self.processor.tokenizer(text, add_special_tokens=False)["input_ids"])
 
-    def decide(self, rows: Sequence[DecisionInput]) -> list[tuple[list[float], int]]:
-        """Probabilities over each row's options (temperature applied) and the number of input tokens, one row at a time."""
+    def decide(self, rows: Sequence[DecisionInput], max_length: int = 8192) -> list[tuple[list[float], int]]:
+        """Probabilities over each row's options (temperature applied) and the number of input tokens, one row at a time.
+        A row longer than max_length tokens is refused, never truncated, as in the PyTorch backend."""
         mx = self.mx
         results = []
         for row in rows:
             count = len(options(row["question"])[0])
             ids = self.prompt_ids(row)
+            if len(ids) > max_length:
+                raise ValueError(f"Question branch exceeds the {max_length}-token limit; no input was truncated.")
             hidden = self.model.language_model.model(mx.array([ids]))[0, -1].astype(mx.float32)
             logits = (self.readout[:count] @ hidden) / self.temperature
             probabilities = mx.softmax(logits, axis=-1)

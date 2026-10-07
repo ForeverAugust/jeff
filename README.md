@@ -192,7 +192,10 @@ unchanging parts of a request first and the changing field last.
 
 jeff-serve answers one request at a time. By default, a request that arrives while another is running gets HTTP 529
 with `Retry-After: 1`. Set `JEFF_QUEUE_MS=500` (for example) and it waits up to that many milliseconds for the model
-before answering 529. Clients that send requests in parallel should set it, or retry on 529. Text-only serving still
+before answering 529. Clients that send requests in parallel should set it, or retry on 529. Inputs are limited to
+8,192 tokens per question, the length Jeff is trained on; a longer one gets 422 and is never truncated. Set
+`JEFF_MAX_TOKENS` (for example `JEFF_MAX_TOKENS=16384`) to allow longer inputs, but accuracy beyond 8,192 tokens is
+unmeasured. Text-only serving still
 needs torchvision, because the model's processor also handles images; `uv sync` installs it, but an existing
 environment may lack it.
 

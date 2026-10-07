@@ -246,7 +246,7 @@ class Uniform:
     backend = "mlx"
     base_model = "Qwen/Qwen3.5-0.8B"
 
-    def decide(self, rows: list[dict]) -> list[tuple[list[float], int]]:
+    def decide(self, rows: list[dict], max_length: int) -> list[tuple[list[float], int]]:
         counts = [len(row["question"].get("criteria") or [0, 0]) for row in rows]
         return [([1 / count] * count, 10) for count in counts]
 

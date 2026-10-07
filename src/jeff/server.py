@@ -7,7 +7,9 @@ is then not served and adapters cannot be reloaded. JEFF_LORA_PRECISION: model (
 dtype) or float32 (the reference).
 
 The model answers one request at a time. JEFF_QUEUE_MS (default 0) is how long a request that arrives while the model is
-busy waits for it; when the wait runs out the request gets 529 with Retry-After: 1."""
+busy waits for it; when the wait runs out the request gets 529 with Retry-After: 1. JEFF_MAX_TOKENS (default 8192, the
+length Jeff models are trained on) is the longest input a question may have; a longer one is refused with 422, never
+truncated."""
 
 from __future__ import annotations
 
@@ -47,6 +49,8 @@ type Content = str | dict[str, JsonValue] | list[JsonValue]
 # Accepted in requests for compatibility with clients written against v1.0 and v1.1, but no longer listed by
 # /v1/models: the name wrongly suggested a 27B model. The served model's real name comes from its checkpoint.
 LEGACY_MODEL = "jeff-qwen3.8-27b"
+# Jeff models are trained on inputs of up to this many tokens; longer inputs work but their accuracy is unmeasured
+TRAINED_MAX_TOKENS = 8192
 DEFAULT_MODEL = LEGACY_MODEL
 ALIASES = {"jeff", "jeff-latest", LEGACY_MODEL}
 
@@ -60,6 +64,7 @@ class Service:
     max_options: int = 0  # the most options the model was trained on; set from decision_config.json
     lock: LockType = field(default_factory=threading.Lock)
     queue_seconds: float = 0  # JEFF_QUEUE_MS: how long a request waits for the model before it gets 529
+    max_tokens: int = TRAINED_MAX_TOKENS  # JEFF_MAX_TOKENS: the longest input (in tokens) a question may have
     # LoRA adapters (JEFF_ADAPTERS): name -> the most options that adapter was trained on; empty without adapters
     adapters: dict[str, int] = field(default_factory=dict)
     adapter_stamps: dict[str, tuple[tuple[str, int, int], ...]] = field(default_factory=dict)
@@ -69,6 +74,15 @@ class Service:
 
 
 service = Service()
+
+
+def max_tokens(value: str | None) -> int:
+    """JEFF_MAX_TOKENS, a whole number of tokens above 0 (the trained length, 8192, when unset)."""
+    if value is None:
+        return TRAINED_MAX_TOKENS
+    if not value.isdigit() or int(value) == 0:
+        raise ValueError(f"JEFF_MAX_TOKENS={value!r}; use a whole number of tokens above 0")
+    return int(value)
 
 
 class Busy(Exception):
@@ -252,6 +266,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     service.checkpoint = os.getenv("JEFF_CHECKPOINT", "checkpoints/selected")
     service.queue_seconds = queue_seconds(os.getenv("JEFF_QUEUE_MS"))
+    service.max_tokens = max_tokens(os.getenv("JEFF_MAX_TOKENS"))
     from jeff.models import device_from_environment, load_decision_model
 
     backend = os.getenv("JEFF_BACKEND", "pytorch")
@@ -348,13 +363,13 @@ def distributions(model: DecisionModel, rows: list[DecisionInput]) -> tuple[list
     import torch
 
     if getattr(model, "backend", None) == "mlx":
-        results: list[tuple[list[float], int]] = model.decide(rows)  # type: ignore[attr-defined]
+        results: list[tuple[list[float], int]] = model.decide(rows, max_length=service.max_tokens)  # type: ignore[attr-defined]
         return [values for values, _ in results], sum(tokens for _, tokens in results)
     output: list[list[float]] = []
     input_tokens = 0
     with torch.inference_mode():
         for start in range(0, len(rows), 8):
-            batch = model.prepare(rows[start:start + 8])
+            batch = model.prepare(rows[start:start + 8], max_length=service.max_tokens)
             probabilities: list[list[float]] = (model(batch) / model.temperature).softmax(-1).cpu().tolist()
             output.extend(values[:count] for values, count in zip(probabilities, batch.counts, strict=True))
             input_tokens += batch.input_tokens
