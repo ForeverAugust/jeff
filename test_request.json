@@ -1,0 +1,25 @@
+{
+  "model": "jeff-latest",
+  "state": "Refund request: the customer says the parcel arrived crushed and wants their money back. The order was placed 3 days ago and shipping insurance was purchased.",
+  "questions": {
+    "route": {
+      "type": "choice",
+      "instructions": "Which team should handle this request?",
+      "criteria": {
+        "billing": "billing team for payment issues",
+        "shipping": "shipping team for delivery damage",
+        "account": "account team for login problems",
+        "sales": "sales team for new purchases"
+      }
+    },
+    "refund_eligible": {
+      "type": "noul",
+      "instructions": "The customer is eligible for a full refund."
+    },
+    "priority": {
+      "type": "score",
+      "instructions": "How urgent is this request?",
+      "criteria": ["low", "medium", "high"]
+    }
+  }
+}
