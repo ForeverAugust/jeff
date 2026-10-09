@@ -11,7 +11,7 @@ NPU 加速另有一套方案（见第八节），这份笔记只解决「先跑�
 | `deploy/install-cpu.sh` | 一键部署（检测架构 → 装 CPU 版 torch → 下载权重 → 启动） |
 | `deploy/jeff-cpu.service` | systemd 单元，常驻运行 |
 
-Windows 版本见 `DEPLOY_NOTES.md`。
+通用 Linux（NVIDIA GPU / x86_64 / aarch64）部署指导见 `LINUX_DEPLOY_GUIDE.md`；Windows 版本见 `DEPLOY_NOTES.md`。
 
 ---
 
@@ -109,7 +109,7 @@ JEFF_HOST=0.0.0.0 PORT=8765 JEFF_QUEUE_MS=2000 \
   uv run --no-default-groups jeff-serve
 ```
 
-权重目录应有 14 个文件，核心是 `model.safetensors`（1,706,027,688 字节）和 `readout.safetensors`（决策头，255×1024）。
+权重目录核心是 `model.safetensors`（1,706,027,688 字节）和 `readout.safetensors`（决策头，255×1024，约 522KB），另需 `config.json`、`decision_config.json`、`chat_template.jinja`、`tokenizer.json`、`tokenizer_config.json`、`processor_config.json`。
 `hf` CLI 若卡住，改用 curl 逐个下：
 
 ```bash
