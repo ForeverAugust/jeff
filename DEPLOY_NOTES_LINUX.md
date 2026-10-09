@@ -7,6 +7,7 @@ NPU 加速另有一套方案（见第八节），这份笔记只解决「先跑�
 
 | 文件 | 用途 |
 |---|---|
+| `deploy/ascend-check.sh` | 只读诊断：跑一遍看机器状态和昇腾特有的冲突（建议先跑这个） |
 | `deploy/install-cpu.sh` | 一键部署（检测架构 → 装 CPU 版 torch → 下载权重 → 启动） |
 | `deploy/jeff-cpu.service` | systemd 单元，常驻运行 |
 
@@ -40,9 +41,19 @@ available = {"cuda": torch.cuda.is_available(), "mps": torch.backends.mps.is_ava
 
 ## 三、一键部署
 
+先跑诊断（只读，不改任何东西），把输出留着对照：
+
 ```bash
 git clone https://gh-proxy.com/https://github.com/ForeverAugust/jeff.git jeff
 cd jeff
+bash deploy/ascend-check.sh
+```
+
+它会报出：架构与 glibc、CPU 核数与内存、`npu-smi` 与 CANN 版本、**PYTHONPATH 是否被 CANN 污染**、系统 Python 里有没有 `torch_npu`、三个镜像源的连通性，以及推荐的线程数和实例数。
+
+然后安装：
+
+```bash
 bash deploy/install-cpu.sh
 ```
 
@@ -155,7 +166,96 @@ CPU 模式下单请求 ~1s，这个限制比 GPU 上痛得多。必须二选一�
 
 ---
 
-## 六、性能预期与并发架构
+## 六、昇腾（910B）专项
+
+### 6.1 CANN 环境变量污染——昇腾头号坑
+
+昇腾装完 CANN 后，文档都会让你把这段写进 `.bashrc`：
+
+```bash
+export ASCEND_TOOLKIT_HOME=/usr/local/Ascend/ascend-toolkit/latest
+source $ASCEND_TOOLKIT_HOME/set_env.sh
+export PYTHONPATH=$ASCEND_TOOLKIT_HOME/python/site-packages:$PYTHONPATH   # ← 问题在这行
+```
+
+最后一行把 CANN 的 Python 包（含 `torch_npu`）暴露给了**所有** Python 进程。`torch_npu` 会劫持 `torch.cuda.is_available()`，后果是：
+
+1. Jeff 的 `device_from_environment()` 看到 `cuda: True`，选了 cuda 设备
+2. 把张量往 "cuda" 上搬 → NPU 上没有 CUDA runtime → 崩或静默错误
+
+**对策**（`install-cpu.sh` 已自动做）：只剥离 PYTHONPATH 里含 `ascend`/`cann` 的条目，其余保留；同时显式 `JEFF_DEVICE=cpu`。
+
+| 变量 | 是否危险 | 说明 |
+|---|---|---|
+| `PYTHONPATH` 含 Ascend 路径 | ⚠️ 危险 | `torch_npu` 劫持设备检测 |
+| `LD_LIBRARY_PATH` 含 CANN lib | ✅ 无害 | 只是动态库搜索路径，不影响设备选择 |
+| `ASCEND_HOME_PATH` / `ASCEND_TOOLKIT_HOME` | ✅ 无害 | 纯路径变量 |
+
+自检：
+
+```bash
+python3 -c "import torch_npu" 2>&1 | tail -1   # 期望：No module named 'torch_npu'
+```
+
+装完 Jeff 后在它的 venv 里再确认一次：
+
+```bash
+.venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# 期望输出：2.14.0+cpu False
+```
+
+### 6.2 线程调优：核多不等于快
+
+昇腾服务器常见 64–128 核（鲲鹏 920）。但 Jeff 是 0.8B 小模型的**短串行图**，线程开多了调度开销反超计算收益 —— 实测规律是 8–16 线程见顶，再多就变慢。
+
+| 逻辑核数 | `OMP_NUM_THREADS`（每实例） | 建议实例数 |
+|---|---|---|
+| ≥ 96 | 16 | 6–8 |
+| 48–95 | 16 | 3–4 |
+| 24–47 | 8 | 3–4 |
+| 12–23 | 8 | 2 |
+| < 12 | 4 | 1 |
+
+`install-cpu.sh` 会按核数自动设置这几个变量：
+
+```bash
+export OMP_NUM_THREADS=$T OMP_PROC_BIND=false MKL_NUM_THREADS=$T OPENBLAS_NUM_THREADS=$T
+```
+
+**多实例优于多线程**：jeff-serve 单实例串行，一个 16 线程实例 ≈ 1 QPS；4 个实例各自 16 线程 ≈ 4 QPS。
+
+### 6.3 鲲鹏（aarch64）上不要做的事
+
+| 做法 | 结论 |
+|---|---|
+| 指望 SVE 加速 / 设 `TORCH_ARM_SVE=1` | ❌ 鲲鹏 920 是 ARMv8.2，**不支持 SVE**，网上流传的这个变量无效 |
+| 把 `torch_npu` 装进 jeff 的 venv | ❌ 见 6.1 |
+| CPU 模式改 bfloat16 | ❌ Jeff 在 CPU 下自动用 float32（`model.py:183`），没有 AMX 的机器上 bf16 更慢 |
+| 用系统自带的 Python 3.7/3.9 | ❌ Jeff 要求 `>=3.12`，脚本用 `uv python install 3.12` 单独装 |
+
+### 6.4 确认 NPU 确实没被用到
+
+CPU 模式下 Jeff 不该占用任何 NPU 算力，可以用这条确认（也用来排查是不是别的任务在抢卡）：
+
+```bash
+npu-smi info            # 看 AICore 利用率
+watch -n 2 npu-smi info # 持续观察，推理时应始终为 0
+```
+
+如果推理时 AICore 有占用，说明 6.1 的隔离没生效，或者 `JEFF_DEVICE` 没设成 cpu。
+
+### 6.5 性能参考
+
+| 平台 | 单请求延迟预估 |
+|---|---|
+| 鲲鹏 920（aarch64） | 1–3s |
+| Xeon（x86_64） | 0.5–1.5s |
+
+比 Windows 桌面（0.75–0.97s）略慢是正常的 —— 服务器 CPU 单核频率通常低于桌面，且 Jeff 的串行推理吃不到多核红利。靠多实例把总吞吐拉起来。
+
+---
+
+## 七、性能预期与并发架构
 
 | 项目 | 预期 |
 |---|---|
@@ -197,7 +297,7 @@ server {
 
 ---
 
-## 七、systemd 常驻
+## 八、systemd 常驻
 
 ```bash
 sudo cp deploy/jeff-cpu.service /etc/systemd/system/
@@ -213,7 +313,7 @@ sudo journalctl -u jeff-cpu -f
 
 ---
 
-## 八、验证部署
+## 九、验证部署
 
 ```bash
 # 健康检查
@@ -235,7 +335,7 @@ python src/run_bench.py --url http://127.0.0.1:8765
 
 ---
 
-## 九、后续：要不要上 NPU
+## 十、后续：要不要上 NPU
 
 | 方案 | 状态 |
 |---|---|
@@ -248,14 +348,16 @@ python src/run_bench.py --url http://127.0.0.1:8765
 
 ---
 
-## 十、踩坑速查
+## 十一、踩坑速查
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
 | `uv sync` 拖了几个 GB | Linux 默认拉 CUDA 版 torch | 先装 `+cpu` wheel，再 `--no-install-package torch --no-install-package torchvision` |
 | 别的机器连不上 | `JEFF_HOST` 默认 127.0.0.1 | 显式设 `JEFF_HOST=0.0.0.0` |
 | 大量 HTTP 529 | 单线程 + `JEFF_QUEUE_MS` 默认 0 | 设 `JEFF_QUEUE_MS=2000`，或 Nginx `proxy_next_upstream http_529` |
-| 报 "no cuda device" 或张量设备错误 | torch_npu 劫持了 `cuda.is_available()` | 显式 `JEFF_DEVICE=cpu`，清理 `PYTHONPATH` |
+| 报 "no cuda device" 或张量设备错误 | torch_npu 劫持了 `cuda.is_available()` | 显式 `JEFF_DEVICE=cpu`，剥离 PYTHONPATH 里的 Ascend 条目（见 6.1） |
+| 核很多但推理很慢 | `OMP_NUM_THREADS` 开太大 | 降到 8–16，改起多实例（见 6.2） |
+| 怀疑 NPU 被占用 / 想确认模式 | — | `watch -n 2 npu-smi info`，CPU 模式 AICore 应始终为 0 |
 | `torch` import 报 GLIBC 版本错 | 系统太老（glibc < 2.28） | 换 Ubuntu 20.04+ / openEuler 22.03+ |
 | aarch64 上某些包装不上 | 缺 aarch64 wheel | 换 x86_64 机器，或从源码编译 |
 | 权重下载卡住 | HuggingFace 直连不通 | `export HF_ENDPOINT=https://hf-mirror.com` |

@@ -40,11 +40,16 @@ log "platform: $ARCH, python $PY_VERSION"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v git  >/dev/null 2>&1 || die "git is required"
 
-# Ascend hosts often export a PYTHONPATH pointing at CANN's python packages.
-# torch_npu there can hijack torch.cuda.is_available() and break CPU mode.
+# Ascend hosts often export a PYTHONPATH pointing at CANN's python packages
+# ($ASCEND_TOOLKIT_HOME/python/site-packages). torch_npu there hijacks
+# torch.cuda.is_available(), which makes Jeff pick the "cuda" device and crash
+# on an NPU. Strip only the Ascend entries, keep everything else.
 if [ -n "${PYTHONPATH:-}" ]; then
-  warn "PYTHONPATH is set; unsetting it for this shell to avoid torch_npu contamination"
-  unset PYTHONPATH
+  CLEAN_PP="$(printf '%s' "$PYTHONPATH" | tr ':' '\n' | grep -viE 'ascend|cann' | paste -sd: -)"
+  if [ "$CLEAN_PP" != "$PYTHONPATH" ]; then
+    warn "stripping Ascend/CANN entries from PYTHONPATH (torch_npu would hijack device detection)"
+    if [ -n "$CLEAN_PP" ]; then export PYTHONPATH="$CLEAN_PP"; else unset PYTHONPATH; fi
+  fi
 fi
 
 # ---------------------------------------------------------------- 1. uv
@@ -139,7 +144,21 @@ if [ "$SKIP_START" = "1" ]; then
   exit 0
 fi
 
-# ---------------------------------------------------------------- 7. start
+# ---------------------------------------------------------------- 7. threads
+# Ascend hosts ship many cores (Kunpeng 920: 64-128), but a 0.8B model is a
+# short serial graph -- threading past ~16 makes it slower, not faster. Prefer
+# several instances over many threads per instance.
+CPUS="$(nproc 2>/dev/null || echo 8)"
+if   [ "$CPUS" -ge 48 ]; then OMP_THREADS=16
+elif [ "$CPUS" -ge 24 ]; then OMP_THREADS=8
+else                          OMP_THREADS=4; fi
+export OMP_NUM_THREADS="$OMP_THREADS"
+export OMP_PROC_BIND=false
+export MKL_NUM_THREADS="$OMP_THREADS"
+export OPENBLAS_NUM_THREADS="$OMP_THREADS"
+log "threads per instance: $OMP_THREADS (host has $CPUS cores)"
+
+# ---------------------------------------------------------------- 8. start
 log "starting jeff-serve on $JEFF_HOST:$PORT"
 JEFF_CHECKPOINT="$CKPT_DIR" \
 JEFF_DEVICE=cpu \
