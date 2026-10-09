@@ -1,0 +1,57 @@
+[Unit]
+Description=Jeff decision server (CPU-only)
+Documentation=https://github.com/ForeverAugust/jeff/blob/main/DEPLOY_NOTES_LINUX.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jeff
+Group=jeff
+WorkingDirectory=/opt/jeff
+
+# --- runtime -----------------------------------------------------------------
+# JEFF_DEVICE=cpu: the only value that works on Ascend hosts (cuda/mps/cpu whitelist)
+# JEFF_HOST:      default is 127.0.0.1; only widen to 0.0.0.0 behind a reverse proxy
+# JEFF_QUEUE_MS:  default is 0, which turns every concurrent request into HTTP 529
+Environment="JEFF_CHECKPOINT=/opt/jeff/checkpoints/jeff-0.8b"
+Environment="JEFF_DEVICE=cpu"
+Environment="JEFF_HOST=127.0.0.1"
+Environment="PORT=8765"
+Environment="JEFF_QUEUE_MS=2000"
+Environment="HF_ENDPOINT=https://hf-mirror.com"
+# Ascend hosts often set PYTHONPATH for CANN; torch_npu there can hijack cuda detection
+Environment="PYTHONPATH="
+
+ExecStart=/opt/jeff/.venv/bin/jeff-serve
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+# --- hardening ---------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+
+StandardOutput=append:/var/log/jeff/jeff.log
+StandardError=append:/var/log/jeff/jeff.log
+
+[Install]
+WantedBy=multi-user.target
+
+# -----------------------------------------------------------------------------
+# Install:
+#   sudo mkdir -p /var/log/jeff && sudo chown jeff:jeff /var/log/jeff
+#   sudo useradd -r -s /sbin/nologin jeff
+#   sudo cp deploy/jeff-cpu.service /etc/systemd/system/
+#   sudo chown -R jeff:jeff /opt/jeff
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jeff-cpu
+#   sudo journalctl -u jeff-cpu -f
+#
+# Multiple instances (single instance is serial, ~1 QPS on CPU):
+#   sudo cp deploy/jeff-cpu.service /etc/systemd/system/jeff-cpu@.service
+#   # then replace PORT=8765 above with PORT=%i and run:
+#   sudo systemctl enable --now jeff-cpu@8765 jeff-cpu@8766 jeff-cpu@8767
+# Put nginx in front and let it retry 529:
+#   proxy_next_upstream error timeout http_529 non_idempotent;

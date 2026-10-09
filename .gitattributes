@@ -1,3 +1,9 @@
+# Linux deployment scripts must keep LF endings (CRLF breaks the shebang on Linux).
+deploy/*.sh text eol=lf
+deploy/*.service text eol=lf
+deploy/*.md text eol=lf
+start.bat text eol=crlf
+
 # Preserve exact trained-source checksums.
 src/jeff/__init__.py whitespace=-blank-at-eof
 src/jeff/events.py whitespace=-blank-at-eof
